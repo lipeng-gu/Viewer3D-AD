@@ -1,0 +1,33 @@
+import os
+import tqdm
+import json
+from dataset.nuscenes_dataset import NuScenes
+
+def nusc_viewer():
+
+    use_gt = False
+    dataroot = '/home/ubuntu/Documents/Project/gulp/YOLOO/data/nuscenes/datasets'
+    result_json = "/home/ubuntu/Documents/Project/gulp/YOLOO/results/nuscenes/20260101_145856/results"
+
+    out_dir = './result_vis_nusc/'
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+
+    if use_gt:
+        nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=True, pred = False, annotations = "sample_annotation")
+    else:
+        nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=True, pred = True, annotations = result_json, score_thr=0.25)
+
+    with open(f'{result_json}.json') as f:
+        table = json.load(f)
+    tokens = list(table['results'].keys())
+
+    for token in tqdm.tqdm(tokens[:100]):
+        if use_gt:
+            nusc.render_sample(token, out_path = f"{out_dir}"+token+"_gt.png", verbose=False)
+        else:
+            nusc.render_sample(token, out_path = f"{out_dir}"+token+"_pred.png", verbose=False)
+
+
+if __name__ == '__main__':
+    nusc_viewer()
