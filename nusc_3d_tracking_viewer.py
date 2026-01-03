@@ -1,6 +1,5 @@
 # ------------------------------------------------------------------------
-# Copyright (c) 2023 Toyota Research Institute
-# 3D MOT BEV Visualization for nuScenes
+# 3D MOT BEV Visualization (Prediction + GT)
 # ------------------------------------------------------------------------
 
 import os
@@ -20,41 +19,28 @@ from utils.nusc_utils.bbox import BBox
 from utils.nusc_utils.visualizer2d import Visualizer2D
 
 
-# =========================
-# Argument Parser
-# =========================
+# ===============================
+# Argument
+# ===============================
 
 def parse_args():
-    """
-    Parse command line arguments.
-    """
-    parser = argparse.ArgumentParser(description='3D Tracking BEV Visualization')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='utils/nusc_utils/configs/nusc_tracking_config.py', help='Config file path')
-    parser.add_argument('--result', required=True, help='Tracking result json file')
-    parser.add_argument('--show-dir', required=True, help='Directory to save visualizations')
+    parser.add_argument('--show_dir', default='work_dirs/vis_results_nusc', help='output directory')
+    parser.add_argument('--score_thresh', default=0.2, help='output directory')
+    parser.add_argument('--result', required=True, help='tracking result json')
     return parser.parse_args()
 
 
-# =========================
-# Utility Functions
-# =========================
+# ===============================
+# Geometry utils
+# ===============================
 
-def lidar_to_global(points, sample_info):
-    """
-    Transform lidar points from LiDAR frame to global frame.
-
-    Args:
-        points (np.ndarray): (N, 3) lidar points
-        sample_info (dict): nuScenes sample info
-
-    Returns:
-        points_global (np.ndarray): (N, 3) points in global frame
-        l2g (np.ndarray): 4x4 lidar-to-global transformation matrix
-    """
-    l2e_r = Quaternion(sample_info['lidar2ego_rotation']).rotation_matrix
-    l2e_t = sample_info['lidar2ego_translation']
-    e2g_r = Quaternion(sample_info['ego2global_rotation']).rotation_matrix
-    e2g_t = sample_info['ego2global_translation']
+def lidar_to_global(points, info):
+    l2e_r = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+    l2e_t = info['lidar2ego_translation']
+    e2g_r = Quaternion(info['ego2global_rotation']).rotation_matrix
+    e2g_t = info['ego2global_translation']
 
     l2e = np.eye(4)
     e2g = np.eye(4)
@@ -67,212 +53,184 @@ def lidar_to_global(points, sample_info):
     return pts[:, :3], e2g @ l2e
 
 
-def get_max_traj_length(traj_dict):
-    """
-    Get maximum trajectory length.
-    """
-    return max(len(v) for v in traj_dict.values())
-
+# ===============================
+# Trajectory utils
+# ===============================
 
 def traj_dict_to_array(traj_dict):
-    """
-    Convert trajectory dictionary to numpy array for plotting.
+    max_len = max(len(v) for v in traj_dict.values())
+    trajs = []
 
-    Args:
-        traj_dict: {track_id: [(x, y), ...]}
+    for t in traj_dict.values():
+        t = [list(p) for p in t]
+        t += [t[-1]] * (max_len - len(t))
+        trajs.append(t)
 
-    Returns:
-        np.ndarray: (N_traj, T, 2)
-    """
-    max_len = get_max_traj_length(traj_dict)
-    traj_list = []
-
-    for traj in traj_dict.values():
-        traj = [list(p) for p in traj]
-        # pad trajectory with last point for alignment
-        traj += [traj[-1]] * (max_len - len(traj))
-        traj_list.append(traj)
-
-    return np.array(traj_list)
+    return np.array(trajs)
 
 
-# =========================
-# Visualization Logic
-# =========================
+# ===============================
+# GT utils
+# ===============================
 
-def visualize_one_frame(
-    sample_idx,
-    sample_token,
-    dataset,
-    sample_info,
-    frame_results,
-    all_results,
-    save_dir
+def build_gt_bbox(box, l2g):
+    bbox = BBox(
+        x=box[0], y=box[1], z=box[2],
+        w=box[3], l=box[4], h=box[5],
+        o=-(box[6] + np.pi / 2)
+    )
+    return BBox.bbox2world(l2g, bbox)
+
+
+def collect_gt_traj(sample_idx, data_infos, instance_ids):
+    traj = {}
+    for i in range(sample_idx + 1):
+        info = data_infos[i]
+        for box, ins_id in zip(info['gt_boxes'], info['instance_inds']):
+            if ins_id in instance_ids:
+                traj.setdefault(ins_id, []).append(box[:2])
+    return traj
+
+
+# ===============================
+# Visualization
+# ===============================
+
+def visualize_pred(
+    sample_idx, sample_token, dataset, info,
+    frame_results, all_results, score_thresh, save_dir
 ):
-    """
-    Visualize one frame with point cloud, bounding boxes and trajectories.
-    """
-    raw_data = dataset[sample_idx]
+    raw = dataset[sample_idx]
+    points = raw['points'].data[0].numpy()[:, :3]
+    points = points[np.max(points, axis=1) < 60]
 
-    # -------- Load & filter point cloud --------
-    points = raw_data['points'].data[0].numpy()[:, :3]
-    points = points[np.max(points, axis=1) < 60]  # 60m range
+    points, l2g = lidar_to_global(points, info)
+    ego = l2g[:3, 3]
 
-    points, l2g = lidar_to_global(points, sample_info)
-    ego_xyz = l2g[:3, 3]
+    vis = Visualizer2D(f'pred_{sample_idx}', figsize=(20, 20))
+    colors = list(vis.COLOR_MAP.keys())
+    vis.handler_pc(points)
 
-    # -------- Initialize visualizer --------
-    visualizer = Visualizer2D(name=str(sample_idx), figsize=(20, 20))
-    color_keys = list(visualizer.COLOR_MAP.keys())
+    plt.xlim(ego[0]-60, ego[0]+60)
+    plt.ylim(ego[1]-60, ego[1]+60)
 
-    visualizer.handler_pc(points)
-
-    plt.xlim((ego_xyz[0] - 60, ego_xyz[0] + 60))
-    plt.ylim((ego_xyz[1] - 60, ego_xyz[1] + 60))
-
-    # -------- Draw current frame boxes --------
-    current_objects = {}   # track_id -> (x, y)
-    color_list = []        # aligned with trajectory order
+    current = {}
+    color_list = []
 
     for obj in frame_results:
-        if obj['tracking_score'] < 0.4:
+        if obj['tracking_score'] < score_thresh:
             continue
 
-        # NOTE: assumes tracking_id format like "xxx-123"
-        track_id = int(obj['tracking_id'].split('-')[-1])
-
-        nusc_box = Box(
-            obj['translation'],
-            obj['size'],
-            Quaternion(obj['rotation'])
-        )
+        tid = int(obj['tracking_id'])
+        box = Box(obj['translation'], obj['size'], Quaternion(obj['rotation']))
 
         bbox = BBox(
-            x=nusc_box.center[0],
-            y=nusc_box.center[1],
-            z=nusc_box.center[2],
-            w=nusc_box.wlh[0],
-            l=nusc_box.wlh[1],
-            h=nusc_box.wlh[2],
-            o=nusc_box.orientation.yaw_pitch_roll[0]
+            x=box.center[0], y=box.center[1], z=box.center[2],
+            w=box.wlh[0], l=box.wlh[1], h=box.wlh[2],
+            o=box.orientation.yaw_pitch_roll[0]
         )
 
-        color_key = color_keys[track_id % len(color_keys)]
-        visualizer.handler_box(
-            bbox,
-            message=str(track_id),
-            color=color_key
-        )
+        ck = colors[tid % len(colors)]
+        vis.handler_box(bbox, message=str(tid), color=ck)
+        current[tid] = np.array(obj['translation'][:2])
+        color_list.append(vis.COLOR_MAP[ck])
 
-        current_objects[track_id] = np.array(obj['translation'][:2])
-        color_list.append(visualizer.COLOR_MAP[color_key])
-
-    # -------- Collect history trajectories --------
-    traj_dict = {}
-
-    for past_token in all_results.keys():
-        if past_token == sample_token:
+    traj = {}
+    for tk in all_results:
+        if tk == sample_token:
             break
-
-        for obj in all_results[past_token]:
-            if obj['tracking_score'] < 0.4:
+        for obj in all_results[tk]:
+            if obj['tracking_score'] < score_thresh:
                 continue
+            tid = int(obj['tracking_id'])
+            if tid in current:
+                traj.setdefault(tid, []).append(obj['translation'][:2])
 
-            track_id = int(obj['tracking_id'].split('-')[-1])
-            if track_id not in current_objects:
-                continue
+    for tid, pt in current.items():
+        traj.setdefault(tid, []).append(pt)
 
-            point = np.array(obj['translation'][:2])
-            traj_dict.setdefault(track_id, []).append(point)
-
-    # append current position as trajectory end
-    for track_id, cur_point in current_objects.items():
-        traj_dict.setdefault(track_id, []).append(cur_point)
-
-    # -------- Draw trajectories --------
-    if len(traj_dict) > 0:
-        trajs = traj_dict_to_array(traj_dict)
+    if traj:
+        trajs = traj_dict_to_array(traj)
         for i in range(trajs.shape[0]):
-            plt.plot(trajs[i, :, 0], trajs[i, :, 1], color=color_list[i])
+            plt.plot(trajs[i,:,0], trajs[i,:,1], color=color_list[i])
 
-    # -------- Save visualization --------
     os.makedirs(save_dir, exist_ok=True)
-    visualizer.save(os.path.join(save_dir, f'{sample_idx}.png'))
-    visualizer.close()
+    vis.save(os.path.join(save_dir, f'{sample_idx}.png'))
+    vis.close()
 
 
-# =========================
-# Video Generation
-# =========================
+def visualize_gt(
+    sample_idx, dataset, info,
+    data_infos, save_dir
+):
+    raw = dataset[sample_idx]
+    points = raw['points'].data[0].numpy()[:, :3]
+    points = points[np.max(points, axis=1) < 60]
 
-def make_video(fig_dir, fig_names, video_name):
-    """
-    Generate BEV video from image sequence.
-    """
-    import imageio
-    import cv2
+    points, l2g = lidar_to_global(points, info)
+    ego = l2g[:3, 3]
 
-    writer = imageio.get_writer(
-        os.path.join(fig_dir, video_name), fps=2
-    )
+    vis = Visualizer2D(f'gt_{sample_idx}', figsize=(20, 20))
+    colors = list(vis.COLOR_MAP.keys())
+    vis.handler_pc(points)
 
-    for name in fig_names:
-        img = imageio.imread(os.path.join(fig_dir, name))
-        img = cv2.resize(img, (2000, 2000))
-        writer.append_data(img)
+    plt.xlim(ego[0]-60, ego[0]+60)
+    plt.ylim(ego[1]-60, ego[1]+60)
 
-    writer.close()
+    ids = []
+    color_list = []
+
+    for box, ins_id in zip(info['gt_boxes'], info['instance_inds']):
+        bbox = build_gt_bbox(box, l2g)
+        ck = colors[ins_id % len(colors)]
+        vis.handler_box(bbox, message=str(ins_id), color=ck)
+        ids.append(ins_id)
+        color_list.append(vis.COLOR_MAP[ck])
+
+    traj = collect_gt_traj(sample_idx, data_infos, ids)
+
+    if traj:
+        trajs = traj_dict_to_array(traj)
+        for i in range(trajs.shape[0]):
+            plt.plot(
+                trajs[i,:,0], trajs[i,:,1], color=color_list[i]
+            )
+
+    os.makedirs(save_dir, exist_ok=True)
+    vis.save(os.path.join(save_dir, f'{sample_idx}.png'))
+    vis.close()
 
 
-# =========================
-# Main Function
-# =========================
+# ===============================
+# Main
+# ===============================
 
 def main():
     args = parse_args()
-
     cfg = Config.fromfile(args.config)
     importlib.import_module('utils.nusc_utils')
 
     dataset = build_dataset(cfg.data.visualization)
-    data_infos = dataset.data_infos
-
-    # map token -> index (avoid O(N) search)
-    token2idx = {info['token']: i for i, info in enumerate(data_infos)}
+    infos = dataset.data_infos
+    token2idx = {i['token']: idx for idx, i in enumerate(infos)}
 
     results = json.load(open(args.result))['results']
 
-    pbar = tqdm(total=len(results))
-    for sample_token in results.keys():
-        sample_idx = token2idx[sample_token]
-        sample_info = data_infos[sample_idx]
+    for token in tqdm(results):
+        idx = token2idx[token]
+        info = infos[idx]
 
-        scene_dir = os.path.join(
-            args.show_dir, sample_info['scene_token']
+        scene_root = os.path.join(args.show_dir, info['scene_token'])
+        visualize_pred(
+            idx, token, dataset, info,
+            results[token], results, score_thresh,
+            os.path.join(scene_root, 'pred')
         )
-
-        visualize_one_frame(
-            sample_idx,
-            sample_token,
-            dataset,
-            sample_info,
-            results[sample_token],
-            results,
-            scene_dir
+        visualize_gt(
+            idx, dataset, info,
+            infos,
+            os.path.join(scene_root, 'gt')
         )
-
-        pbar.update(1)
-    pbar.close()
-
-    # -------- Make videos for each scene --------
-    print('Making videos...')
-    for scene_token in os.listdir(args.show_dir):
-        scene_dir = os.path.join(args.show_dir, scene_token)
-        fig_names = sorted(
-            [f for f in os.listdir(scene_dir) if f.endswith('.png')],
-            key=lambda x: int(x.split('.')[0])
-        )
-        make_video(scene_dir, fig_names, 'videobev.mp4')
 
 
 if __name__ == '__main__':
