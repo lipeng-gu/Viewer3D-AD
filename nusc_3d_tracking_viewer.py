@@ -27,7 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='utils/nusc_utils/configs/nusc_tracking_config.py', help='Config file path')
     parser.add_argument('--show_dir', default='work_dirs/vis_results_nusc', help='output directory')
-    parser.add_argument('--score_thresh', default=0.2, help='output directory')
+    parser.add_argument('--score_thresh', default=0, help='output directory')
     parser.add_argument('--result', required=True, help='tracking result json')
     return parser.parse_args()
 
@@ -135,24 +135,24 @@ def visualize_pred(
         current[tid] = np.array(obj['translation'][:2])
         color_list.append(vis.COLOR_MAP[ck])
 
-    traj = {}
-    for tk in all_results:
-        if tk == sample_token:
-            break
-        for obj in all_results[tk]:
-            if obj['tracking_score'] < score_thresh:
-                continue
-            tid = int(obj['tracking_id'])
-            if tid in current:
-                traj.setdefault(tid, []).append(obj['translation'][:2])
+    # traj = {}
+    # for tk in all_results:
+    #     if tk == sample_token:
+    #         break
+    #     for obj in all_results[tk]:
+    #         if obj['tracking_score'] < score_thresh:
+    #             continue
+    #         tid = int(obj['tracking_id'])
+    #         if tid in current:
+    #             traj.setdefault(tid, []).append(obj['translation'][:2])
+    #
+    # for tid, pt in current.items():
+    #     traj.setdefault(tid, []).append(pt)
 
-    for tid, pt in current.items():
-        traj.setdefault(tid, []).append(pt)
-
-    if traj:
-        trajs = traj_dict_to_array(traj)
-        for i in range(trajs.shape[0]):
-            plt.plot(trajs[i,:,0], trajs[i,:,1], color=color_list[i])
+    # if traj:
+    #     trajs = traj_dict_to_array(traj)
+    #     for i in range(trajs.shape[0]):
+    #         plt.plot(trajs[i,:,0], trajs[i,:,1], color=color_list[i])
 
     os.makedirs(save_dir, exist_ok=True)
     vis.save(os.path.join(save_dir, f'{sample_idx}.png'))
@@ -187,14 +187,11 @@ def visualize_gt(
         ids.append(ins_id)
         color_list.append(vis.COLOR_MAP[ck])
 
-    traj = collect_gt_traj(sample_idx, data_infos, ids)
-
-    if traj:
-        trajs = traj_dict_to_array(traj)
-        for i in range(trajs.shape[0]):
-            plt.plot(
-                trajs[i,:,0], trajs[i,:,1], color=color_list[i]
-            )
+    # traj = collect_gt_traj(sample_idx, data_infos, ids)
+    # if traj:
+    #     trajs = traj_dict_to_array(traj)
+    #     for i in range(trajs.shape[0]):
+    #         plt.plot(trajs[i,:,0], trajs[i,:,1], color=color_list[i])
 
     os.makedirs(save_dir, exist_ok=True)
     vis.save(os.path.join(save_dir, f'{sample_idx}.png'))
@@ -223,7 +220,7 @@ def main():
         scene_root = os.path.join(args.show_dir, info['scene_token'])
         visualize_pred(
             idx, token, dataset, info,
-            results[token], results, score_thresh,
+            results[token], results, args.score_thresh,
             os.path.join(scene_root, 'pred')
         )
         visualize_gt(
